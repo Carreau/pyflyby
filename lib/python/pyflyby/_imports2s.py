@@ -343,6 +343,7 @@ def fix_unused_and_missing_imports(codeblock,
     codeblock = reformat_import_statements(codeblock, params=params)
 
     filename = codeblock.filename
+    ## this is the thing that adds imports.
     transformer = SourceToSourceFileImportsTransformation(codeblock)
     missing_imports, unused_imports = scan_for_import_issues(
         codeblock, find_unused_imports=remove_unused, parse_docstrings=True)

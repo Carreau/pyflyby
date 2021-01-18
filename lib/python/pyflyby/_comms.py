@@ -10,6 +10,7 @@ import six
 MISSING_IMPORTS = "pyflyby.missing_imports"
 FORMATTING_IMPORTS = "pyflyby.format_imports"
 INIT_COMMS = "pyflyby.init_comms"
+INSERT_IMPORTS = "pyflyby.insert_import"
 
 pyflyby_comm_targets= [MISSING_IMPORTS, FORMATTING_IMPORTS]
 
@@ -90,6 +91,7 @@ def comm_open_handler(comm, message):
     (at this point, just the jupyterlab frontend does this).
 
     """
+    # this is what is triggered after refomatting.
     from   pyflyby._imports2s       import reformat_import_statements
 
     comm.on_close(comm_close_handler)
@@ -98,6 +100,30 @@ def comm_open_handler(comm, message):
     @comm.on_msg
     def _recv(msg):
 
+        data = msg["content"]["data"] 
         if msg["content"]["data"]["type"] == FORMATTING_IMPORTS:
             fmt_code = reformat_import_statements(msg["content"]["data"]["input_code"])
             comm.send({"formatted_code": str(fmt_code), "type": FORMATTING_IMPORTS})
+        elif data["type"] == INSERT_IMPORTS:
+            from pyflyby._imports2s import SourceToSourceFileImportsTransformation
+            cell_text = data['input_code']
+            imports = data['imports']
+
+            transform = SourceToSourceFileImportsTransformation(cell_text)
+
+            from pyflyby._importstmt import Import
+            if isinstance(imports, str):
+                imports = [imports]
+
+            for imp in imports:
+                assert isinstance(imp, str)
+                if not imp.strip():
+                    continue
+                try:
+                    transform.add_import(Import(imp))
+                except Exception as e:
+                    raise type(e)(f"from {imp!r} {imports!r}")
+
+            result = transform.output()
+            # we hook onto _formatted_code on the txs side that needs the same logic (replacing the cell).
+            comm.send({"formatted_code": str(result), "type": INSERT_IMPORTS})
