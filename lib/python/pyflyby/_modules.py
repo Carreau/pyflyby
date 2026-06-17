@@ -21,7 +21,7 @@ from   pyflyby._fast_iter_modules \
 from   pyflyby._file            import FileText, Filename
 from   pyflyby._idents          import DottedIdentifier, is_identifier
 from   pyflyby._log             import logger
-from   pyflyby._util            import (ExcludeImplicitCwdFromPathCtx, cmp,
+from   pyflyby._util            import (ExcludeImplicitCwdFromPathCtx,
                                         memoize, prefixes)
 
 import re
@@ -491,22 +491,12 @@ class ModuleHandle(object):
     def __hash__(self) -> int:
         return hash(self.name)
 
-    def __cmp__(self, o: Any) -> Any:
-        if self is o:
-            return 0
-        if not isinstance(o, ModuleHandle):
-            return NotImplemented
-        return cmp(self.name, o.name)
-
     def __eq__(self, o: Any) -> Any:
         if self is o:
             return True
         if not isinstance(o, ModuleHandle):
             return NotImplemented
         return self.name == o.name
-
-    def __ne__(self, other: Any) -> bool:
-        return not (self == other)
 
     # The rest are defined by total_ordering
     def __lt__(self, o: Any) -> Any:

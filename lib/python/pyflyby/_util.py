@@ -442,10 +442,6 @@ def AdviceCtx(joinpoint: Any, hook: Callable[..., Any]) -> Iterator[None]:
     finally:
         advice.unadvise()  # type: ignore[union-attr]
 
-# For Python 2/3 compatibility. cmp isn't included with six.
-def cmp(a: Any, b: Any) -> int:
-    return (a > b) - (a < b)
-
 
 # Create a context manager with an arbitrary number of contexts.
 @contextmanager

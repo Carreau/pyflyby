@@ -11,7 +11,7 @@ import sys
 from   typing                   import (Any, Callable, ClassVar, List,
                                         Optional, Tuple, Union)
 
-from   pyflyby._util            import cmp, memoize
+from   pyflyby._util            import memoize
 
 from   types                    import NoneType
 
@@ -78,21 +78,11 @@ class Filename(object):
             return NotImplemented
         return self._filename == o._filename
 
-    def __ne__(self, other: object) -> bool:
-        return not (self == other)
-
     # The rest are defined by total_ordering
     def __lt__(self, o: object) -> bool:
         if not isinstance(o, Filename):
             return NotImplemented
         return self._filename < o._filename
-
-    def __cmp__(self, o: object) -> int:
-        if self is o:
-            return 0
-        if not isinstance(o, Filename):
-            return NotImplemented
-        return cmp(self._filename, o._filename)
 
     @cached_property
     def ext(self) -> Optional[str]:
@@ -324,16 +314,6 @@ class FilePos(object):
         if not isinstance(other, FilePos):
             return NotImplemented
         return self._data == other._data
-
-    def __ne__(self, other: object) -> bool:
-        return not (self == other)
-
-    def __cmp__(self, other: object) -> int:
-        if self is other:
-            return 0
-        if not isinstance(other, FilePos):
-            return NotImplemented
-        return cmp(self._data, other._data)
 
     # The rest are defined by total_ordering
     def __lt__(self, other: object):
@@ -655,22 +635,11 @@ class FileText:
                 self.joined   == o.joined   and
                 self.startpos == o.startpos)
 
-    def __ne__(self, other: object) -> bool:
-        return not (self == other)
-
     # The rest are defined by total_ordering
     def __lt__(self, o: object) -> bool:
         if not isinstance(o, FileText):
             return NotImplemented
         return ((self.filename, self.joined, self.startpos) <
-                   (o   .filename, o   .joined, o   .startpos))
-
-    def __cmp__(self, o: object) -> int:
-        if self is o:
-            return 0
-        if not isinstance(o, FileText):
-            return NotImplemented
-        return cmp((self.filename, self.joined, self.startpos),
                    (o   .filename, o   .joined, o   .startpos))
 
     def __hash__(self):

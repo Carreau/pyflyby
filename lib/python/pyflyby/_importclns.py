@@ -15,7 +15,7 @@ from   pyflyby._importstmt      import (Import, ImportFormatParams,
                                         ImportStatement,
                                         NonImportStatementError)
 from   pyflyby._parse           import PythonBlock
-from   pyflyby._util            import (cached_attribute, cmp, partition,
+from   pyflyby._util            import (cached_attribute, partition,
                                         stable_unique)
 
 from   typing                   import (Any, ClassVar, Dict, FrozenSet,
@@ -513,21 +513,11 @@ class ImportSet:
             return NotImplemented
         return self._importset == other._importset
 
-    def __ne__(self, other: Any) -> bool:
-        return not (self == other)
-
     # The rest are defined by total_ordering
     def __lt__(self, other: Any) -> Any:
         if not isinstance(other, ImportSet):
             return NotImplemented
         return self._importset < other._importset
-
-    def __cmp__(self, other: Any) -> Any:
-        if self is other:
-            return 0
-        if not isinstance(other, ImportSet):
-            return NotImplemented
-        return cmp(self._importset, other._importset)
 
     def __hash__(self) -> int:
         return hash(self._importset)
@@ -642,21 +632,11 @@ class ImportMap(object):
             return NotImplemented
         return self._data == other._data
 
-    def __ne__(self, other: Any) -> bool:
-        return not (self == other)
-
     # The rest are defined by total_ordering
     def __lt__(self, other: Any) -> Any:
         if not isinstance(other, ImportMap):
             return NotImplemented
         return self._data < other._data  # type: ignore[operator]
-
-    def __cmp__(self, other: Any) -> Any:
-        if self is other:
-            return 0
-        if not isinstance(other, ImportMap):
-            return NotImplemented
-        return cmp(self._data, other._data)
 
     def __hash__(self) -> int:
         h = hash(self._data)

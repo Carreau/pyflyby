@@ -9,7 +9,7 @@ from   functools                import total_ordering
 from   keyword                  import iskeyword
 import re
 
-from   pyflyby._util            import cached_attribute, cmp
+from   pyflyby._util            import cached_attribute
 
 from   typing                   import (Any, Dict, Iterator, List, Optional,
                                         Tuple, Union)
@@ -214,22 +214,8 @@ class DottedIdentifier:
             return NotImplemented
         return self.name == other.name
 
-    def __ne__(self, other: Any) -> bool:
-        if self is other:
-            return False
-        if not isinstance(other, DottedIdentifier):
-            return NotImplemented
-        return self.name != other.name
-
     # The rest are defined by total_ordering
     def __lt__(self, other: Any) -> bool:
         if not isinstance(other, DottedIdentifier):
             return NotImplemented
         return self.name < other.name
-
-    def __cmp__(self, other: Any) -> int:
-        if self is other:
-            return 0
-        if not isinstance(other, DottedIdentifier):
-            return NotImplemented
-        return cmp(self.name, other.name)

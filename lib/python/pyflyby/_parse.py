@@ -26,7 +26,6 @@ from   itertools                import groupby
 from   pyflyby._file            import FilePos, FileText, Filename
 from   pyflyby._flags           import CompilerFlags
 from   pyflyby._log             import logger
-from   pyflyby._util            import cmp
 
 import re
 import sys
@@ -456,21 +455,11 @@ class PythonStatement:
             return NotImplemented
         return self.block == other.block
 
-    def __ne__(self, other: Any) -> bool:
-        return not (self == other)
-
     # The rest are defined by total_ordering
     def __lt__(self, other: Any) -> bool:
         if not isinstance(other, PythonStatement):
             return NotImplemented
         return self.block < other.block
-
-    def __cmp__(self, other: Any) -> int:
-        if self is other:
-            return 0
-        if not isinstance(other, PythonStatement):
-            return NotImplemented
-        return cmp(self.block, other.block)
 
     def __hash__(self) -> int:
         return hash(self.block)
@@ -1019,21 +1008,11 @@ class PythonBlock:
             return NotImplemented
         return self.text == other.text and self.flags == other.flags
 
-    def __ne__(self, other: Any) -> bool:
-        return not (self == other)
-
     # The rest are defined by total_ordering
     def __lt__(self, other: Any) -> bool:
         if not isinstance(other, PythonBlock):
             return NotImplemented
         return (self.text, self.flags) < (other.text, other.flags)
-
-    def __cmp__(self, other: Any) -> int:
-        if self is other:
-            return 0
-        if not isinstance(other, PythonBlock):
-            return NotImplemented
-        return cmp(self.text, other.text) or cmp(self.flags, other.flags)
 
     def __hash__(self) -> int:
         h = hash((self.text, self.flags))
