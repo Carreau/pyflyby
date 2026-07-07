@@ -1112,9 +1112,17 @@ class _MissingImportFinder:
             logger.debug("Got star import: line %s: 'from %s import *'",
                          self._lineno, modulename)
         if not node.asname and not is_star:
-            # Handle leading prefixes so we don't think they're unused
+            # Handle leading prefixes so we don't think they're unused.  E.g.
+            # for 'import foo.bar', register 'foo' as present so that a bare
+            # reference to 'foo' isn't reported as missing.  However, only do
+            # this if the prefix isn't already bound in this scope: if there's
+            # a separate 'import foo', that binding must not be clobbered with
+            # ``None`` (which would both drop its _UseChecker and prematurely
+            # record it as unused).  See GH #27.
+            scope = self.scopestack[-1]
             for prefix in DottedIdentifier(node.name).prefixes[:-1]:
-                self._visit_Store(str(prefix), None)
+                if str(prefix) not in scope:
+                    self._visit_Store(str(prefix), None)
         # Only honour pragmas on the alias's own line(s).  Scanning the whole
         # parent ``ImportFrom`` range would over-protect siblings in a
         # parenthesized ``from x import (a, b)`` group when only one alias is
@@ -1151,7 +1159,14 @@ class _MissingImportFinder:
         if isinstance(fullname, ast.arg):
             fullname = fullname.arg
         if self.find_unused_imports:
-            if fullname != '*':
+            # Only run the ancestor "mark used" check for regular stores
+            # (``value is None``), e.g. an attribute assignment
+            # "foo.bar.baz = 123".  For import stores (``value`` is a
+            # _UseChecker, e.g. from "import foo.bar") the prefixes are already
+            # registered by _visit_StoreImport, and treating the store as a use
+            # of the ancestor would wrongly keep a separate "import foo" alive.
+            # See GH #27.
+            if fullname != '*' and value is None:
                 # If we're storing "foo.bar.baz = 123", then "foo" and
                 # "foo.bar" have now been used and the import should not be
                 # removed.
