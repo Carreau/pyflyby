@@ -1566,6 +1566,45 @@ def test_scan_for_import_issues_setcomp_unused_1():
     assert unused == [(2, Import('import x1'), None)]
 
 
+def test_scan_for_import_issues_submodule_sibling_used_1():
+    # GH #27: 'import foo.bar' must not cause a sibling 'import foo' to be
+    # reported as unused when 'foo' is actually used.  Only the unused
+    # submodule import should be reported.
+    code = dedent("""
+        import foo, baz, foo.bar
+        foo
+        baz
+    """)
+    missing, unused = scan_for_import_issues(code)
+    assert missing == []
+    assert unused == [(2, Import('import foo.bar'), None)]
+
+
+def test_scan_for_import_issues_submodule_redundant_sibling_1():
+    # The converse of GH #27: when only the submodule 'foo.bar' is used, the
+    # redundant plain 'import foo' should be reported as unused.
+    code = dedent("""
+        import foo
+        import foo.bar
+        foo.bar
+    """)
+    missing, unused = scan_for_import_issues(code)
+    assert missing == []
+    assert unused == [(2, Import('import foo'), None)]
+
+
+def test_scan_for_import_issues_submodule_attr_assignment_1():
+    # Assigning to an attribute of an imported module counts as using it, so
+    # 'import foo' must not be reported as unused.
+    code = dedent("""
+        import foo
+        foo.bar = 1
+    """)
+    missing, unused = scan_for_import_issues(code)
+    assert missing == []
+    assert unused == []
+
+
 def test_scan_for_import_issues_class_subclass_imported_class_1():
     code = dedent("""
         from m1 import C1
