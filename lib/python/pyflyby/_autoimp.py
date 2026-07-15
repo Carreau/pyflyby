@@ -928,32 +928,63 @@ class _MissingImportFinder:
             self._visit_Store(node.name)
         self.visit(node.body)
 
+    def _visit_mutually_exclusive_branches(self, branches: List[Any]) -> None:
+        """
+        Visit each of ``branches`` (each accepted by ``self.visit``, e.g. a
+        list of statements or a single handler node) against the same
+        starting scope, on the assumption that at most one of them executes
+        at runtime.  Afterwards, merge their effects into the current scope
+        conservatively:
+
+        - a name stored in ANY branch is considered defined afterward
+          (optimistic union), so that a name conditionally assigned in only
+          some branches doesn't cause a false "missing import" report later.
+        - a name is only removed afterward if it was deleted in EVERY
+          branch (conservative intersection), since we don't statically
+          know which branch, if any, actually ran.
+
+        See https://github.com/deshaw/pyflyby/issues/20.
+        """
+        scope = self.scopestack[-1]
+        base = dict(scope)
+        merged = dict(base)
+        deleted_in_all: Optional[Set[str]] = None
+        for branch in branches:
+            scope.clear()
+            scope.update(base)
+            self.visit(branch)
+            merged.update(scope)
+            deleted = set(base) - set(scope)
+            deleted_in_all = (
+                deleted if deleted_in_all is None else deleted_in_all & deleted
+            )
+        for name in (deleted_in_all or ()):
+            merged.pop(name, None)
+        scope.clear()
+        scope.update(merged)
+
     def visit_Try(self, node: ast.Try) -> None:
         """
-        ``try``/``except`` handlers are mutually exclusive alternatives: at
-        most one of them executes.  Visit each handler against a snapshot of
-        the scope as it was right after the ``try`` body, so that e.g. a
-        ``del`` in one handler doesn't leak into a sibling handler.
-        Afterwards, restore that same snapshot before visiting
-        ``orelse``/``finalbody``, since we don't statically know whether any
-        handler ran, so a name deleted in only one handler should still be
-        considered defined afterwards.
+        ``try``/``except`` handlers, and the exception-free ``orelse``
+        path, are mutually exclusive alternatives: exactly one of them
+        "runs" (where ``orelse`` stands for "no exception occurred").
+        ``finalbody`` always runs afterward regardless of which one did.
         """
         self.visit(node.body)
-        scope = self.scopestack[-1]
-        saved = dict(scope)
-        for handler in node.handlers:
-            scope.clear()
-            scope.update(saved)
-            self.visit(handler)
-        scope.clear()
-        scope.update(saved)
-        self.visit(node.orelse)
+        self._visit_mutually_exclusive_branches([node.orelse, *node.handlers])
         self.visit(node.finalbody)
 
     if sys.version_info >= (3, 11):
         # ``try``/``except*``; same fields as ``ast.Try``.
         visit_TryStar = visit_Try
+
+    def visit_If(self, node: ast.If) -> None:
+        """
+        ``if``/``else`` branches are mutually exclusive alternatives: at
+        most one of them executes.
+        """
+        self.visit(node.test)
+        self._visit_mutually_exclusive_branches([node.body, node.orelse])
 
     def visit_Dict(self, node: ast.Dict) -> None:
         assert node._fields == ('keys', 'values')

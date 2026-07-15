@@ -1670,6 +1670,44 @@ def test_scan_for_import_issues_del_in_except_handler_then_use_after_try_1():
     assert unused == []
 
 
+def test_scan_for_import_issues_del_in_if_branch_1():
+    """
+    'del a' in one 'if'/'else' branch must not affect the other branch,
+    since at most one of them runs.
+    """
+    code = dedent("""
+        def foo(cond):
+            a = None
+            if cond:
+                del a
+            else:
+                a.foo()
+    """)
+    missing, unused = scan_for_import_issues(code)
+    assert missing == []
+    assert unused == []
+
+
+def test_scan_for_import_issues_del_in_if_branch_then_use_after_1():
+    """
+    A name deleted in only one (mutually-exclusive) 'if'/'else' branch
+    should still be considered defined after the 'if' statement, since we
+    can't know whether that branch actually ran.
+    """
+    code = dedent("""
+        def foo(cond):
+            a = None
+            if cond:
+                del a
+            else:
+                pass
+            a.foo()
+    """)
+    missing, unused = scan_for_import_issues(code)
+    assert missing == []
+    assert unused == []
+
+
 def _concrete_ast_node_names():
     """
     All concrete (leaf) ``ast.AST`` node type names for the running Python
@@ -1722,9 +1760,18 @@ _KNOWN_GENERICALLY_VISITED_AST_NODES = {
     "BinOp", "BoolOp", "UnaryOp", "Compare", "Await", "Yield", "YieldFrom",
     "IfExp", "FormattedValue", "JoinedStr", "NamedExpr", "List", "Set",
     "Tuple", "Starred", "Subscript", "Slice", "TypeIgnore", "TypeVar",
-    "TypeVarTuple", "ParamSpec", "TypeAlias", "keyword", "withitem",
+    "TypeVarTuple", "ParamSpec", "TypeAlias", "keyword",
     "Expression", "Interactive", "FunctionType", "Interpolation",
     "TemplateStr",
+
+    # 'with'/'async with': unlike 'if'/'try', the body isn't a mutually
+    # exclusive alternative to anything -- it unconditionally executes (a
+    # raised exception aborts the whole statement, not just skips to a
+    # sibling branch), so there's no branch-leak risk and generic_visit's
+    # sequential visiting is correct.  'withitem.optional_vars' (the "as
+    # VAR" target) is a Name/Tuple with Store context that visit_Name
+    # already handles when generic-visited.
+    "With", "AsyncWith", "withitem",
 
     # Simple statements with no name-binding semantics of their own beyond
     # their (generically-visited) subexpressions.
@@ -1739,11 +1786,16 @@ _KNOWN_GENERICALLY_VISITED_AST_NODES = {
     "MatchValue", "MatchSingleton", "MatchSequence", "MatchClass",
     "MatchOr",
 
-    # Branching statements (only one of body/orelse actually executes) that
-    # do not yet have dedicated scope-aware handling analogous to
-    # visit_Try.  See https://github.com/deshaw/pyflyby/issues/20, which
-    # was exactly this class of bug for 'try'/'except'.
-    "If", "For", "AsyncFor", "While", "With", "AsyncWith",
+    # Loop bodies: unlike 'if'/'try' branches, these aren't mutually
+    # exclusive alternatives -- 'body' runs zero or more times, then
+    # 'orelse' runs unless the loop was broken out of.  A 'del' inside the
+    # loop body leaking past the loop is mostly correct if the loop ran at
+    # least once (the del really did happen on the last iteration); it's
+    # only wrong for the zero-iterations case, a narrower and lower-severity
+    # gap than the 'if'/'try' branch-leak bug from
+    # https://github.com/deshaw/pyflyby/issues/20, so it's left unhandled
+    # for now.
+    "For", "AsyncFor", "While",
 }
 
 
