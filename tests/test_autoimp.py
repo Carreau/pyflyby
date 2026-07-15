@@ -15,8 +15,8 @@ from   textwrap                 import dedent
 
 from   pyflyby                  import (Filename, ImportDB, auto_eval,
                                         auto_import, find_missing_imports)
-from   pyflyby._autoimp         import (LoadSymbolError, load_symbol,
-                                        scan_for_import_issues)
+from   pyflyby._autoimp         import (LoadSymbolError, _MissingImportFinder,
+                                        load_symbol, scan_for_import_issues)
 from   pyflyby._flags           import CompilerFlags
 from   pyflyby._idents          import DottedIdentifier
 from   pyflyby._importstmt      import Import
@@ -1669,6 +1669,122 @@ def test_scan_for_import_issues_del_in_except_handler_then_use_after_try_1():
     assert missing == []
     assert unused == []
 
+
+def _concrete_ast_node_names():
+    """
+    All concrete (leaf) ``ast.AST`` node type names for the running Python
+    version -- i.e. excluding abstract grammar categories like ``stmt``,
+    ``expr``, ``operator``, etc., which are never themselves the type of an
+    actual node.
+    """
+    all_names = {
+        name for name in dir(ast)
+        if isinstance(getattr(ast, name), type)
+        and issubclass(getattr(ast, name), ast.AST)
+    }
+    abstract_base_names = set()
+    for name in all_names:
+        for base in getattr(ast, name).__bases__:
+            abstract_base_names.add(base.__name__)
+    return all_names - abstract_base_names - {"AST"}
+
+
+# Concrete ast node types that _MissingImportFinder has no dedicated
+# visit_<Name> method for, grouped by why generic_visit is (currently)
+# fine for them.  If a Python upgrade adds a *new* node type here, or an
+# existing visit_<Name> method gets removed, this set will fall out of
+# sync with _concrete_ast_node_names() and test_missing_import_finder_ast_
+# node_coverage will fail, forcing a conscious decision about whether the
+# node needs its own handler instead of silently falling back to
+# generic_visit.
+_KNOWN_GENERICALLY_VISITED_AST_NODES = {
+    # Operators/boolops/cmpops/unaryops: never dispatched to directly for
+    # name-binding purposes, just read off their parent expr node's
+    # .op/.ops attribute.
+    "Add", "Sub", "Mult", "Div", "FloorDiv", "Mod", "Pow", "LShift",
+    "RShift", "BitAnd", "BitOr", "BitXor", "MatMult", "Invert", "Not",
+    "UAdd", "USub", "And", "Or", "Eq", "NotEq", "Lt", "LtE", "Gt", "GtE",
+    "Is", "IsNot", "In", "NotIn",
+
+    # Expression-context markers: read directly off .ctx by
+    # visit_Name/visit_Attribute/etc., not separately dispatched.
+    "Load", "Store", "Del", "AugLoad", "AugStore", "Param",
+
+    # Deprecated aliases kept for backwards compatibility; not produced by
+    # the parser anymore (superseded by ast.Constant).
+    "ExtSlice", "Index", "Suite", "Bytes", "Ellipsis", "NameConstant",
+    "Num", "Str",
+
+    # Composite expressions/misc nodes whose children are visited
+    # generically and which don't themselves bind, delete, or branch over
+    # names (e.g. NamedExpr's target is an ast.Name with Store context,
+    # which visit_Name already handles).
+    "BinOp", "BoolOp", "UnaryOp", "Compare", "Await", "Yield", "YieldFrom",
+    "IfExp", "FormattedValue", "JoinedStr", "NamedExpr", "List", "Set",
+    "Tuple", "Starred", "Subscript", "Slice", "TypeIgnore", "TypeVar",
+    "TypeVarTuple", "ParamSpec", "TypeAlias", "keyword", "withitem",
+    "Expression", "Interactive", "FunctionType", "Interpolation",
+    "TemplateStr",
+
+    # Simple statements with no name-binding semantics of their own beyond
+    # their (generically-visited) subexpressions.
+    "Assert", "Break", "Continue", "Raise", "Return",
+
+    # 'global'/'nonlocal' declarations and plain 'import x': pre-existing
+    # gaps, not touched by this test.
+    "Global", "Nonlocal", "Import",
+
+    # match-statement sub-patterns that don't bind names themselves (unlike
+    # MatchAs/MatchStar/MatchMapping, which do have dedicated handlers).
+    "MatchValue", "MatchSingleton", "MatchSequence", "MatchClass",
+    "MatchOr",
+
+    # Branching statements (only one of body/orelse actually executes) that
+    # do not yet have dedicated scope-aware handling analogous to
+    # visit_Try.  See https://github.com/deshaw/pyflyby/issues/20, which
+    # was exactly this class of bug for 'try'/'except'.
+    "If", "For", "AsyncFor", "While", "With", "AsyncWith",
+}
+
+
+def test_missing_import_finder_ast_node_coverage():
+    """
+    Canary test: every concrete ast node type must either have a dedicated
+    ``_MissingImportFinder.visit_<Name>`` method, or be explicitly listed
+    in ``_KNOWN_GENERICALLY_VISITED_AST_NODES`` as reviewed-safe to fall
+    back to the default ``generic_visit``.
+
+    This exists because https://github.com/deshaw/pyflyby/issues/20 was
+    caused by exactly this kind of silent gap: ``ast.Try`` had no
+    dedicated visitor, so its mutually-exclusive ``except`` handlers were
+    generic-visited sequentially against a single shared scope, and a
+    ``del`` in one handler leaked into its siblings.
+    """
+    concrete = _concrete_ast_node_names()
+    handled = {
+        name[len("visit_"):]
+        for name in dir(_MissingImportFinder)
+        if name.startswith("visit_")
+    }
+    unhandled = concrete - handled
+    undocumented = unhandled - _KNOWN_GENERICALLY_VISITED_AST_NODES
+    assert undocumented == set(), (
+        "New ast node type(s) with no _MissingImportFinder.visit_<Name> "
+        "method and no entry in _KNOWN_GENERICALLY_VISITED_AST_NODES: "
+        f"{sorted(undocumented)}. Add a dedicated visit_<Name> method if "
+        "the node can bind/delete/branch over names, otherwise add it to "
+        "_KNOWN_GENERICALLY_VISITED_AST_NODES with a reason."
+    )
+    # Entries that don't exist as ast node types on this Python version at
+    # all (e.g. ast.TypeVar pre-3.12) are simply not applicable here; only
+    # flag entries that exist on this version but no longer need to be
+    # generically-visited (i.e. they now have a dedicated visit_<Name>).
+    stale = (_KNOWN_GENERICALLY_VISITED_AST_NODES & concrete) - unhandled
+    assert stale == set(), (
+        "_KNOWN_GENERICALLY_VISITED_AST_NODES contains stale entries that "
+        f"now have a dedicated visit_<Name> method and should be removed: "
+        f"{sorted(stale)}"
+    )
 
 def test_scan_for_import_issues_brace_identifiers_1():
     code = dedent("""
