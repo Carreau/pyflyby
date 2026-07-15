@@ -928,6 +928,33 @@ class _MissingImportFinder:
             self._visit_Store(node.name)
         self.visit(node.body)
 
+    def visit_Try(self, node: ast.Try) -> None:
+        """
+        ``try``/``except`` handlers are mutually exclusive alternatives: at
+        most one of them executes.  Visit each handler against a snapshot of
+        the scope as it was right after the ``try`` body, so that e.g. a
+        ``del`` in one handler doesn't leak into a sibling handler.
+        Afterwards, restore that same snapshot before visiting
+        ``orelse``/``finalbody``, since we don't statically know whether any
+        handler ran, so a name deleted in only one handler should still be
+        considered defined afterwards.
+        """
+        self.visit(node.body)
+        scope = self.scopestack[-1]
+        saved = dict(scope)
+        for handler in node.handlers:
+            scope.clear()
+            scope.update(saved)
+            self.visit(handler)
+        scope.clear()
+        scope.update(saved)
+        self.visit(node.orelse)
+        self.visit(node.finalbody)
+
+    if sys.version_info >= (3, 11):
+        # ``try``/``except*``; same fields as ``ast.Try``.
+        visit_TryStar = visit_Try
+
     def visit_Dict(self, node: ast.Dict) -> None:
         assert node._fields == ('keys', 'values')
         # In Python 3, keys can be None, indicating a ** expression

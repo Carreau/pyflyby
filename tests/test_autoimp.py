@@ -1628,6 +1628,48 @@ def test_scan_for_import_issues_del_in_func_then_use_1():
     assert unused == []
 
 
+def test_scan_for_import_issues_del_in_sibling_except_handler_1():
+    """
+    https://github.com/deshaw/pyflyby/issues/20
+
+    'del a' in one 'except' branch must not affect sibling branches,
+    since at most one 'except' branch runs.
+    """
+    code = dedent("""
+        def foo():
+            try:
+                a = None
+            except ValueError:
+                del a
+            except TypeError:
+                a.foo()
+    """)
+    missing, unused = scan_for_import_issues(code)
+    assert missing == []
+    assert unused == []
+
+
+def test_scan_for_import_issues_del_in_except_handler_then_use_after_try_1():
+    """
+    A name deleted in only one (mutually-exclusive) 'except' branch should
+    still be considered defined after the 'try' statement, since we can't
+    know whether that branch actually ran.
+    """
+    code = dedent("""
+        def foo():
+            try:
+                a = None
+            except ValueError:
+                del a
+            except TypeError:
+                pass
+            a.foo()
+    """)
+    missing, unused = scan_for_import_issues(code)
+    assert missing == []
+    assert unused == []
+
+
 def test_scan_for_import_issues_brace_identifiers_1():
     code = dedent("""
         import x1, x2, x3
