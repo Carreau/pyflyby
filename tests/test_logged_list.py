@@ -49,47 +49,34 @@ def test_logged_list_inherits_only_tracking_neutral_methods():
         "so they bypass access tracking: %s" % (inherited,))
 
 
-def _call_spec(func):
-    # Reduce a signature to what it accepts *as a call*: how many positional
-    # arguments are required, how many are allowed (None = unbounded, i.e.
-    # ``*args``), and the keyword-only parameters with their defaults.
-    # Parameter names are deliberately ignored: ``list``'s methods are C
-    # builtins whose parameters are positional-only, so their names ("object",
-    # "value") are not part of the callable interface and need not be matched.
-    positional = (inspect.Parameter.POSITIONAL_ONLY,
-                  inspect.Parameter.POSITIONAL_OR_KEYWORD)
-    params = list(inspect.signature(func).parameters.values())[1:]  # drop self
-    required = sum(1 for p in params
-                   if p.kind in positional and p.default is p.empty)
-    allowed = (None
-               if any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in params)
-               else sum(1 for p in params if p.kind in positional))
-    keyword_only = {p.name: p.default for p in params
-                    if p.kind is inspect.Parameter.KEYWORD_ONLY}
-    return required, allowed, keyword_only
+def _unannotated(sig):
+    # Strip type annotations from a signature.  ``LoggedList``'s methods are
+    # annotated; the ``list`` methods they mirror are C builtins and cannot
+    # carry annotations at all, so the types are the one part of the signature
+    # that cannot be compared against the reference.
+    return sig.replace(
+        parameters=[p.replace(annotation=p.empty)
+                    for p in sig.parameters.values()],
+        return_annotation=inspect.Signature.empty)
 
 
 @pytest.mark.parametrize("name", sorted(
     name for name in dir(list)
     if not name.startswith("_") and name in vars(LoggedList)))
-def test_logged_list_method_accepts_what_list_accepts(name):
-    # An override must accept every call the ``list`` method accepts -- it
-    # stands in for ``sys.argv``, so e.g. ``sys.argv.index(x, start, stop)``
-    # must keep working.  It may accept *more* (a broader override is
-    # harmless), so this checks compatibility rather than equality.
-    ref_required, ref_allowed, ref_kwonly = _call_spec(getattr(list, name))
-    required, allowed, kwonly = _call_spec(getattr(LoggedList, name))
-    assert required <= ref_required, (
-        "LoggedList.%s requires more positional arguments than list.%s"
-        % (name, name))
-    assert allowed is None or (ref_allowed is not None and allowed >= ref_allowed), (
-        "LoggedList.%s accepts fewer positional arguments than list.%s"
-        % (name, name))
-    # Keyword-only parameters *are* part of the interface by name (``sort``'s
-    # ``key``/``reverse``), so those must match exactly, defaults included.
-    assert kwonly == ref_kwonly, (
-        "LoggedList.%s has different keyword-only parameters than list.%s"
-        % (name, name))
+def test_logged_list_method_signature_matches_list(name):
+    # ``LoggedList`` stands in for ``sys.argv``, so its overrides must be
+    # indistinguishable from the ``list`` methods they replace -- identical
+    # signatures, not merely compatible ones.  Parameter names and
+    # positional-only markers are part of that: they are what ``help()``,
+    # ``inspect.signature`` and editor completions report, and they decide
+    # which calls are legal (``list.append`` takes no ``object=`` keyword, so
+    # neither may ours).  Defaults count too; a drifting default (say
+    # ``reverse=True``) would silently change behavior.
+    actual = _unannotated(inspect.signature(getattr(LoggedList, name)))
+    expected = _unannotated(inspect.signature(getattr(list, name)))
+    assert actual == expected, (
+        "LoggedList.%s%s does not match list.%s%s"
+        % (name, actual, name, expected))
 
 
 # ---------------------------------------------------------------------------

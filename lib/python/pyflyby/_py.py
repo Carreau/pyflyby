@@ -292,7 +292,13 @@ from   shlex                    import quote as shquote
 import sys
 import types
 from types import FunctionType, MethodType, ModuleType
-from   typing                   import Any
+from   typing                   import (Any, Callable, Iterable,
+                                        Iterator, SupportsIndex, TypeVar,
+                                        overload)
+if sys.version_info >= (3, 11):
+    from typing import Self
+else:
+    from typing_extensions import Self
 import warnings
 
 from   pyflyby._autoimp         import auto_import, find_missing_imports
@@ -1047,7 +1053,10 @@ def auto_apply(function, commandline_args, namespace, arg_mode=None,
         _handle_user_exception()
 
 
-class LoggedList(list):
+_T = TypeVar("_T")
+
+
+class LoggedList(list[_T]):
     """
     A `list` that additionally tracks which items have not yet been accessed.
 
@@ -1069,56 +1078,62 @@ class LoggedList(list):
 
     _ACCESSED = object()
 
-    def __init__(self, items):
-        items = list(items)
-        super().__init__(items)
-        self._unaccessed = items
+    # Mirrors the items position-for-position; each entry is either the item
+    # itself (not yet accessed) or the ``_ACCESSED`` sentinel.
+    _unaccessed: list[Any]
 
-    def _mark_all_accessed(self):
+    def __init__(self, items: Iterable[_T]) -> None:
+        item_list = list(items)
+        super().__init__(item_list)
+        self._unaccessed = item_list
+
+    def _mark_all_accessed(self) -> None:
         self._unaccessed[:] = [self._ACCESSED] * len(self._unaccessed)
 
-    def append(self, x):
+    def append(self, object: _T, /) -> None:
         self._unaccessed.append(self._ACCESSED)
-        super().append(x)
+        super().append(object)
 
-    def clear(self):
+    def clear(self, /) -> None:
         super().clear()
         self._unaccessed.clear()
 
-    def copy(self):
+    def copy(self, /) -> list[_T]:
         # Copying reads every element, just like ``sys.argv[:]``, so mark
         # everything accessed and hand back a plain list (as ``list.copy``
         # does).
         self._mark_all_accessed()
         return super().copy()
 
-    def extend(self, new_items):
-        new_items = list(new_items)
+    def extend(self, iterable: Iterable[_T], /) -> None:
+        new_items = list(iterable)
         self._unaccessed.extend([self._ACCESSED] * len(new_items))
         super().extend(new_items)
 
-    def index(self, x, *start_stop):
-        index = super().index(x, *start_stop) # may raise ValueError
+    def index(self, value: Any, start: SupportsIndex = 0,
+              stop: SupportsIndex = sys.maxsize, /) -> int:
+        index = super().index(value, start, stop) # may raise ValueError
         self._unaccessed[index] = self._ACCESSED
         return index
 
-    def insert(self, index, x):
+    def insert(self, index: SupportsIndex, object: _T, /) -> None:
         self._unaccessed.insert(index, self._ACCESSED)
-        super().insert(index, x)
+        super().insert(index, object)
 
-    def pop(self, index=-1):
+    def pop(self, index: SupportsIndex = -1, /) -> _T:
         self._unaccessed.pop(index)
         return super().pop(index)
 
-    def remove(self, x):
-        index = super().index(x)
+    def remove(self, value: _T, /) -> None:
+        index = super().index(value)
         self.pop(index)
 
-    def reverse(self):
+    def reverse(self, /) -> None:
         super().reverse()
         self._unaccessed.reverse()
 
-    def sort(self, *, key=None, reverse=False):
+    def sort(self, /, *, key: Callable[[_T], Any] | None = None,
+             reverse: bool = False) -> None:
         # Sorting must permute the tracking state the same way it permutes the
         # items, so argsort rather than sorting in place.  Read the items
         # through ``list`` so that sorting does not itself count as access.
@@ -1128,13 +1143,13 @@ class LoggedList(list):
         else:
             keyfunc = lambda i: key(items[i])
         indexes = list(range(len(items)))
-        indexes.sort(key=keyfunc, reverse=reverse) # argsort
+        indexes.sort(key=keyfunc, reverse=reverse) # type: ignore[arg-type]  # argsort
         # Assign through ``list`` to avoid re-entering our own __setitem__,
         # which would mark everything accessed.
         super().__setitem__(slice(None), [items[i] for i in indexes])
         self._unaccessed[:] = [self._unaccessed[i] for i in indexes]
 
-    def __reduce__(self):
+    def __reduce__(self) -> tuple[Any, ...]:
         # ``list`` subclasses are pickled/copied by reconstructing a bare
         # instance and re-filling it, which never runs __init__ and would leave
         # ``_unaccessed`` missing.  Reconstruct through the constructor
@@ -1143,56 +1158,69 @@ class LoggedList(list):
         accessed = [x is self._ACCESSED for x in self._unaccessed]
         return (type(self), (super().copy(),), accessed)
 
-    def __setstate__(self, accessed):
+    def __setstate__(self, accessed: list[bool]) -> None:
         self._unaccessed = [self._ACCESSED if was_accessed else x
                             for was_accessed, x
                             in zip(accessed, super().copy())]
 
-    def __contains__(self, x):
+    def __contains__(self, key: object, /) -> bool:
         try:
-            self.index(x)
+            self.index(key)
             return True
         except ValueError:
             return False
 
-    def __delitem__(self, x):
-        super().__delitem__(x)
-        del self._unaccessed[x]
+    def __delitem__(self, key: SupportsIndex | slice, /) -> None:
+        super().__delitem__(key)
+        del self._unaccessed[key]
 
-    def __getitem__(self, idx):
+    @overload
+    def __getitem__(self, idx: SupportsIndex, /) -> _T: ...
+    @overload
+    def __getitem__(self, idx: slice, /) -> list[_T]: ...
+
+    def __getitem__(self, idx: SupportsIndex | slice, /) -> Any:
         result = super().__getitem__(idx)
         if isinstance(idx, slice):
+            assert isinstance(result, list)
             self._unaccessed[idx] = [self._ACCESSED]*len(result)
         else:
             self._unaccessed[idx] = self._ACCESSED
         return result
 
-    def __iadd__(self, x):
-        self.extend(x)
+    # mypy requires __iadd__ be compatible with __add__, which takes only a
+    # list; this mirrors list.__iadd__, which likewise accepts any iterable.
+    def __iadd__(self, value: Iterable[_T], /) -> Self:  # type: ignore[override,misc]
+        self.extend(value)
         return self
 
-    def __imul__(self, n):
-        super().__imul__(n)
-        self._unaccessed *= n
+    def __imul__(self, value: SupportsIndex, /) -> Self:
+        super().__imul__(value)
+        self._unaccessed *= value
         return self
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[_T]:
         # Todo: detect mutation while iterating.
         for i, x in enumerate(super().__iter__()):
             self._unaccessed[i] = self._ACCESSED
             yield x
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         self._mark_all_accessed()
         return super().__repr__()
 
-    def __reversed__(self):
+    def __reversed__(self) -> Iterator[_T]:
         # Todo: detect mutation while iterating.
         for i in reversed(range(super().__len__())):
             self._unaccessed[i] = self._ACCESSED
             yield super().__getitem__(i)
 
-    def __setitem__(self, idx, value):
+    @overload
+    def __setitem__(self, idx: SupportsIndex, value: _T, /) -> None: ...
+    @overload
+    def __setitem__(self, idx: slice, value: Iterable[_T], /) -> None: ...
+
+    def __setitem__(self, idx: SupportsIndex | slice, value: Any, /) -> None:
         # Assigning to a position counts as *accessing* it, for both single-index
         # and slice assignment: the caller has replaced whatever was there, so
         # the old value can no longer be reported as an unused argument, and the
@@ -1202,18 +1230,18 @@ class LoggedList(list):
             # would consume), and can change the length of the list, so
             # materialize the value to get both the items and their count.
             value = list(value)
-            marker = [self._ACCESSED] * len(value)
+            marker: Any = [self._ACCESSED] * len(value)
         else:
             marker = self._ACCESSED
         super().__setitem__(idx, value)
         self._unaccessed[idx] = marker
 
-    def __str__(self):
+    def __str__(self) -> str:
         self._mark_all_accessed()
         return super().__repr__()
 
     @property
-    def unaccessed(self):
+    def unaccessed(self) -> list[_T]:
         return [x for x in self._unaccessed if x is not self._ACCESSED]
 
 
