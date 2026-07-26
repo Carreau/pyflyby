@@ -10,22 +10,86 @@
 
 from __future__ import print_function
 
+import copy
+import inspect
 import operator
+# Safe: the only data unpickled here is what this test just pickled itself.
+import pickle
 
 import pytest
 
 from   pyflyby._py              import LoggedList
 
 
-def test_logged_list_exposes_all_list_methods():
-    # ``LoggedList`` stands in for ``sys.argv``, which is a plain ``list``, so
-    # it must expose every public method a ``list`` does -- otherwise scripts
-    # doing e.g. ``sys.argv.index("--flag")`` or ``sys.argv.count(x)`` break.
+def _raw(ll):
+    # Read a LoggedList's contents without going through its overrides, so that
+    # inspecting it in a test does not itself count as accessing the items.
+    return list.copy(ll)
+
+
+# Methods deliberately left to ``list``: they neither mutate the list nor mark
+# anything accessed, so inheriting them is exactly equivalent to forwarding to
+# ``super()``.
+_TRACKING_NEUTRAL = {"count"}
+
+
+def test_logged_list_inherits_only_tracking_neutral_methods():
+    # ``LoggedList`` is a real ``list`` subclass, so any method it does *not*
+    # override operates on the underlying storage directly -- silently skipping
+    # the access tracking and desynchronizing ``_unaccessed``.  A method may
+    # therefore only be inherited if it is listed above as tracking-neutral;
+    # this test is the tripwire for anything else (e.g. a list method added by
+    # a future Python) quietly slipping through untracked.
     list_methods = {name for name in dir(list) if not name.startswith("_")}
-    missing = sorted(
-        name for name in list_methods if not callable(getattr(LoggedList, name, None))
-    )
-    assert missing == [], "LoggedList is missing list methods: %s" % (missing,)
+    inherited = sorted(name for name in list_methods
+                       if name not in vars(LoggedList)
+                       and name not in _TRACKING_NEUTRAL)
+    assert inherited == [], (
+        "LoggedList inherits these list methods rather than overriding them, "
+        "so they bypass access tracking: %s" % (inherited,))
+
+
+def _call_spec(func):
+    # Reduce a signature to what it accepts *as a call*: how many positional
+    # arguments are required, how many are allowed (None = unbounded, i.e.
+    # ``*args``), and the keyword-only parameters with their defaults.
+    # Parameter names are deliberately ignored: ``list``'s methods are C
+    # builtins whose parameters are positional-only, so their names ("object",
+    # "value") are not part of the callable interface and need not be matched.
+    positional = (inspect.Parameter.POSITIONAL_ONLY,
+                  inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    params = list(inspect.signature(func).parameters.values())[1:]  # drop self
+    required = sum(1 for p in params
+                   if p.kind in positional and p.default is p.empty)
+    allowed = (None
+               if any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in params)
+               else sum(1 for p in params if p.kind in positional))
+    keyword_only = {p.name: p.default for p in params
+                    if p.kind is inspect.Parameter.KEYWORD_ONLY}
+    return required, allowed, keyword_only
+
+
+@pytest.mark.parametrize("name", sorted(
+    name for name in dir(list)
+    if not name.startswith("_") and name in vars(LoggedList)))
+def test_logged_list_method_accepts_what_list_accepts(name):
+    # An override must accept every call the ``list`` method accepts -- it
+    # stands in for ``sys.argv``, so e.g. ``sys.argv.index(x, start, stop)``
+    # must keep working.  It may accept *more* (a broader override is
+    # harmless), so this checks compatibility rather than equality.
+    ref_required, ref_allowed, ref_kwonly = _call_spec(getattr(list, name))
+    required, allowed, kwonly = _call_spec(getattr(LoggedList, name))
+    assert required <= ref_required, (
+        "LoggedList.%s requires more positional arguments than list.%s"
+        % (name, name))
+    assert allowed is None or (ref_allowed is not None and allowed >= ref_allowed), (
+        "LoggedList.%s accepts fewer positional arguments than list.%s"
+        % (name, name))
+    # Keyword-only parameters *are* part of the interface by name (``sort``'s
+    # ``key``/``reverse``), so those must match exactly, defaults included.
+    assert kwonly == ref_kwonly, (
+        "LoggedList.%s has different keyword-only parameters than list.%s"
+        % (name, name))
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +171,7 @@ def test_logged_list_operation_matches_list(seed, op):
     # Same return value (compared before/independently of any mutation)...
     assert op(ref) == op(ll)
     # ...and same resulting contents (compared without relying on __eq__).
-    assert list(ll._items) == ref
+    assert _raw(ll) == ref
 
 
 @pytest.mark.parametrize(
@@ -125,6 +189,27 @@ def test_logged_list_operation_raises_like_list(op):
 def test_logged_list_copy_returns_plain_list():
     c = LoggedList([1, 2, 3]).copy()
     assert isinstance(c, list) and not isinstance(c, LoggedList)
+
+
+@pytest.mark.parametrize("clone", [
+    copy.copy,
+    copy.deepcopy,
+    lambda x: pickle.loads(pickle.dumps(x)),
+], ids=["copy", "deepcopy", "pickle"])
+def test_logged_list_round_trips(clone):
+    # ``list`` subclasses are reconstructed without running __init__, so the
+    # tracking state has to be carried explicitly -- otherwise the clone comes
+    # back with no ``_unaccessed`` at all, or with a desynced one.
+    ll = LoggedList(["a", "b", "c"])
+    ll[1]                                    # access exactly one item
+    c = clone(ll)
+    assert isinstance(c, LoggedList)
+    assert _raw(c) == ["a", "b", "c"]
+    assert c.unaccessed == ["a", "c"]
+    # The clone tracks independently of the original.
+    c[0]
+    assert c.unaccessed == ["c"]
+    assert ll.unaccessed == ["a", "c"]
 
 
 @pytest.mark.parametrize("op, expected", [
@@ -212,9 +297,9 @@ def test_logged_list_setitem_slice_accepts_iterator(value, expected):
     # not from the slice.
     ll = LoggedList([1, 2, 3])
     ll[1:2] = value
-    assert list(ll._items) == expected
+    assert _raw(ll) == expected
     # The access-tracking bookkeeping must stay in sync with the items.
-    assert len(ll._unaccessed) == len(ll._items)
+    assert len(ll._unaccessed) == len(_raw(ll))
 
 
 def test_logged_list_setitem_extended_slice_iterator_size_mismatch():
@@ -223,7 +308,7 @@ def test_logged_list_setitem_extended_slice_iterator_size_mismatch():
     ll = LoggedList([1, 2, 3])
     with pytest.raises(ValueError):
         ll[::2] = iter(["a"])
-    assert list(ll._items) == [1, 2, 3]
+    assert _raw(ll) == [1, 2, 3]
     assert len(ll._unaccessed) == 3
 
 
@@ -247,7 +332,7 @@ def test_logged_list_setitem_does_not_mark_others_accessed():
     ll = LoggedList(["a", "b", "c"])
     ll[0] = "x"
     ll[-1] = "z"
-    assert list(ll._items) == ["x", "b", "z"]
+    assert _raw(ll) == ["x", "b", "z"]
     assert ll.unaccessed == ["b"]
 
 
