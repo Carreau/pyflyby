@@ -15,6 +15,7 @@ import inspect
 import operator
 # Safe: the only data unpickled here is what this test just pickled itself.
 import pickle
+import random
 
 import pytest
 
@@ -27,10 +28,40 @@ def _raw(ll):
     return list.copy(ll)
 
 
-# Methods deliberately left to ``list``: they neither mutate the list nor mark
-# anything accessed, so inheriting them is exactly equivalent to forwarding to
-# ``super()``.
-_TRACKING_NEUTRAL = {"count"}
+def _assert_tracking_aligned(ll):
+    # The core invariant: ``_unaccessed`` mirrors the items position for
+    # position, each entry being either the item itself (not yet accessed) or
+    # the accessed sentinel.  Any mutation that updates the items but not the
+    # tracking state -- or updates them in a different order -- breaks this,
+    # which then misreports which arguments went unused.
+    items = _raw(ll)
+    assert len(ll._unaccessed) == len(items), (
+        "tracking desynced: %d items but %d tracking slots"
+        % (len(items), len(ll._unaccessed)))
+    for i, (item, tracked) in enumerate(zip(items, ll._unaccessed)):
+        assert tracked is LoggedList._ACCESSED or tracked == item, (
+            "tracking misaligned at %d: item %r but tracking holds %r"
+            % (i, item, tracked))
+
+
+# Methods deliberately left to ``list``, each because it neither mutates the
+# list nor needs to mark anything accessed, so inheriting it is exactly
+# equivalent to forwarding to ``super()``.  Dunders are included deliberately:
+# an earlier version of this test filtered them out by name, which made it
+# blind to exactly the ones most likely to read the raw array.
+_TRACKING_NEUTRAL = {
+    "count",             # reads items but reports only a tally
+    "__class__", "__class_getitem__", "__init_subclass__",
+    "__new__", "__subclasshook__", "__dir__", "__format__",
+    "__getattribute__", "__setattr__", "__delattr__", "__sizeof__",
+    "__reduce_ex__",     # defers to __reduce__, which is overridden
+    "__hash__",          # None on list; LoggedList is unhashable the same way
+    "__len__",           # a count, not a read of any item
+    "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
+                         # comparing is not "using" an argument; see
+                         # test_logged_list_unequal_comparison_does_not_mark
+    "__getstate__",      # unused: __reduce__ supplies the state
+}
 
 
 def test_logged_list_inherits_only_tracking_neutral_methods():
@@ -39,9 +70,10 @@ def test_logged_list_inherits_only_tracking_neutral_methods():
     # the access tracking and desynchronizing ``_unaccessed``.  A method may
     # therefore only be inherited if it is listed above as tracking-neutral;
     # this test is the tripwire for anything else (e.g. a list method added by
-    # a future Python) quietly slipping through untracked.
-    list_methods = {name for name in dir(list) if not name.startswith("_")}
-    inherited = sorted(name for name in list_methods
+    # a future Python) quietly slipping through untracked.  Dunders count:
+    # ``__add__`` and ``__mul__`` read every element, so inheriting those would
+    # silently lose tracking.
+    inherited = sorted(name for name in dir(list)
                        if name not in vars(LoggedList)
                        and name not in _TRACKING_NEUTRAL)
     assert inherited == [], (
@@ -159,18 +191,43 @@ def test_logged_list_operation_matches_list(seed, op):
     assert op(ref) == op(ll)
     # ...and same resulting contents (compared without relying on __eq__).
     assert _raw(ll) == ref
+    _assert_tracking_aligned(ll)
+
+
+_RAISING_OPERATIONS = {
+    "index-missing":   ([1, 2],    lambda x: x.index(9),            ValueError),
+    "index-empty":     ([],        lambda x: x.index(9),            ValueError),
+    "remove-missing":  ([1, 2],    lambda x: x.remove(9),           ValueError),
+    "remove-empty":    ([],        lambda x: x.remove(9),           ValueError),
+    "pop-empty":       ([],        lambda x: x.pop(),               IndexError),
+    "pop-out-of-range": ([1, 2],   lambda x: x.pop(5),              IndexError),
+    "getitem-oob":     ([1, 2],    lambda x: x[5],                  IndexError),
+    "setitem-oob":     ([1, 2],    lambda x: x.__setitem__(5, 0),   IndexError),
+    "delitem-oob":     ([1, 2],    lambda x: x.__delitem__(5),      IndexError),
+    "setitem-ext-size": ([1, 2, 3], lambda x: x.__setitem__(slice(None, None, 2), [1]),
+                                                                    ValueError),
+    "getitem-str-idx": ([1, 2],    lambda x: x["a"],                TypeError),
+}
 
 
 @pytest.mark.parametrize(
-    "op",
-    [lambda x: x.index("z"), lambda x: x.remove("z")],
-    ids=["index", "remove"],
+    "seed, op, exc_type",
+    list(_RAISING_OPERATIONS.values()),
+    ids=list(_RAISING_OPERATIONS.keys()),
 )
-def test_logged_list_operation_raises_like_list(op):
-    with pytest.raises(ValueError):
-        op(["a", "b"])
-    with pytest.raises(ValueError):
-        op(LoggedList(["a", "b"]))
+def test_logged_list_operation_raises_like_list(seed, op, exc_type):
+    # The exception *message* matters, not just the type: ``remove`` used to
+    # report "list.index(x): x not in list" because it delegated to index,
+    # which a bare pytest.raises(ValueError) could not see.
+    with pytest.raises(exc_type) as ref_exc:
+        op(list(seed))
+    ll = LoggedList(seed)
+    with pytest.raises(exc_type) as exc:
+        op(ll)
+    assert str(exc.value) == str(ref_exc.value)
+    # A failed operation must leave the tracking state untouched, not
+    # half-applied.
+    _assert_tracking_aligned(ll)
 
 
 def test_logged_list_copy_returns_plain_list():
@@ -365,3 +422,144 @@ def test_logged_list_copy_marks_all_accessed():
     ll = LoggedList([1, 2, 3])
     ll.copy()
     assert ll.unaccessed == []
+
+
+def test_logged_list_concat_and_repeat_mark_accessed():
+    # ``+`` and ``*`` read every element, so they must mark everything
+    # accessed -- otherwise ``args = sys.argv + extra`` is reported as an
+    # unused argument even though the code plainly used it.
+    for build in [lambda x: x + ["z"],
+                  lambda x: x * 2,
+                  lambda x: 2 * x]:
+        ll = LoggedList(["a", "b"])
+        build(ll)
+        assert ll.unaccessed == [], "%s left items unaccessed" % (build,)
+
+
+def test_logged_list_sort_with_mutating_key_raises_like_list():
+    # ``list.sort`` refuses to sort a list its own key function mutated;
+    # silently discarding the mutation (as a blind write-back would) loses
+    # data.
+    def check(seq):
+        def key(v):
+            seq.append(v)
+            return v
+        with pytest.raises(ValueError) as exc:
+            seq.sort(key=key)
+        return str(exc.value)
+    assert check(LoggedList([3, 1, 2])) == check([3, 1, 2])
+
+
+class _SubList(LoggedList):
+    def __init__(self, items, extra=None):
+        super().__init__(items)
+        self.extra = extra
+
+
+@pytest.mark.parametrize("clone", [
+    copy.copy,
+    copy.deepcopy,
+    lambda x: pickle.loads(pickle.dumps(x)),
+], ids=["copy", "deepcopy", "pickle"])
+def test_logged_list_round_trip_preserves_subclass_attributes(clone):
+    # A plain list subclass keeps its instance __dict__ across copy/pickle;
+    # LoggedList must not lose it just because it defines __reduce__.
+    c = clone(_SubList(["a", "b"], extra="hi"))
+    assert isinstance(c, _SubList)
+    assert c.extra == "hi"
+    _assert_tracking_aligned(c)
+
+
+@pytest.mark.parametrize("clone", [copy.copy, copy.deepcopy], ids=["copy", "deepcopy"])
+def test_logged_list_round_trip_with_changed_init_signature(clone):
+    # Reconstructing through ``type(self)(items)`` would break any subclass
+    # whose __init__ takes something else.
+    class Sub(LoggedList):
+        def __init__(self, a, b):
+            super().__init__([a, b])
+    c = clone(Sub(1, 2))
+    assert _raw(c) == [1, 2]
+    _assert_tracking_aligned(c)
+
+
+@pytest.mark.parametrize("clone", [
+    copy.deepcopy,
+    lambda x: pickle.loads(pickle.dumps(x)),
+], ids=["deepcopy", "pickle"])
+def test_logged_list_round_trip_self_referential(clone):
+    # A list containing itself round-trips for a plain list; putting the items
+    # in the reconstructor's *arguments* would recurse forever instead, since
+    # the object cannot be memoized until they are all built.
+    ll = LoggedList(["a"])
+    ll.append(ll)
+    c = clone(ll)
+    assert len(c) == 2
+    assert c[1] is c
+    _assert_tracking_aligned(c)
+
+
+@pytest.mark.parametrize("proto", range(pickle.HIGHEST_PROTOCOL + 1))
+def test_logged_list_pickle_preserves_tracking(proto):
+    ll = LoggedList(["a", "b", "c"])
+    ll[1]                                    # access exactly one item
+    c = pickle.loads(pickle.dumps(ll, proto))
+    assert _raw(c) == ["a", "b", "c"]
+    assert c.unaccessed == ["a", "c"]
+    _assert_tracking_aligned(c)
+
+
+# Applied to a list and a LoggedList alike; each returns a value to compare and
+# leaves the container in a state to compare.  Kept separate from
+# _LIST_OPERATIONS because these are driven in random sequences, not one-shot.
+_FUZZ_OPERATIONS = [
+    lambda x, v: x.append(v),
+    lambda x, v: x.insert(v % 7 - 3, v),
+    lambda x, v: x.extend([v, v + 1]),
+    lambda x, v: x.extend(iter([v])),
+    lambda x, v: x.pop() if x else None,
+    lambda x, v: x.pop(v % max(len(x), 1)) if x else None,
+    lambda x, v: x.remove(v) if v in x else None,
+    lambda x, v: x.reverse(),
+    lambda x, v: x.sort(),
+    lambda x, v: x.sort(key=lambda i: -i, reverse=True),
+    lambda x, v: x.clear() if v % 11 == 0 else None,
+    lambda x, v: x.__setitem__(slice(v % 3, v % 3 + 2), [v, v + 1]),
+    lambda x, v: x.__setitem__(slice(None, None, 2), [v] * len(x[::2])),
+    lambda x, v: x.__delitem__(slice(v % 3, v % 3 + 1)),
+    lambda x, v: x.__setitem__(v % len(x), v) if x else None,
+    lambda x, v: x.__imul__(v % 3),
+    lambda x, v: x.__iadd__([v]),
+    lambda x, v: x[v % max(len(x), 1)] if x else None,
+    lambda x, v: x[::-1],
+    lambda x, v: v in x,
+    lambda x, v: x.copy(),
+]
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_logged_list_fuzz_matches_list(seed):
+    # Differential fuzz: drive a list and a LoggedList through the same random
+    # sequence of operations and require identical results, identical contents,
+    # and an intact tracking invariant at every step.  This is the net that
+    # catches desyncs the hand-written cases do not think to try.
+    rand = random.Random(seed)
+    ref = [1, 2, 3]
+    ll = LoggedList([1, 2, 3])
+    for step in range(60):
+        op = rand.choice(_FUZZ_OPERATIONS)
+        value = rand.randrange(-5, 15)
+        try:
+            expected = op(ref, value)
+            error = None
+        except Exception as e:
+            expected, error = None, (type(e), str(e))
+        if error is None:
+            actual = op(ll, value)
+            assert actual == expected, (
+                "step %d: got %r, list gave %r" % (step, actual, expected))
+        else:
+            with pytest.raises(error[0]) as exc:
+                op(ll, value)
+            assert str(exc.value) == error[1], "step %d message differs" % (step,)
+        assert _raw(ll) == ref, "step %d: contents diverged" % (step,)
+        _assert_tracking_aligned(ll)

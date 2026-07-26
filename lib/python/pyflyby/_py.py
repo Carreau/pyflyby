@@ -1054,6 +1054,16 @@ def auto_apply(function, commandline_args, namespace, arg_mode=None,
 
 
 _T = TypeVar("_T")
+_S = TypeVar("_S")
+
+
+def _new_logged_list(cls: Any) -> Any:
+    # Reconstructor for `LoggedList.__reduce__`: makes an instance without
+    # running __init__ (whose signature a subclass may have changed), with
+    # ``_unaccessed`` seeded so that the appends which follow do not fail.
+    obj = cls.__new__(cls)
+    obj._unaccessed = []
+    return obj
 
 
 class LoggedList(list[_T]):
@@ -1125,7 +1135,11 @@ class LoggedList(list[_T]):
         return super().pop(index)
 
     def remove(self, value: _T, /) -> None:
-        index = super().index(value)
+        try:
+            index = super().index(value)
+        except ValueError:
+            # Report as ``list.remove`` does, not as ``list.index`` does.
+            raise ValueError("list.remove(x): x not in list") from None
         self.pop(index)
 
     def reverse(self, /) -> None:
@@ -1146,22 +1160,90 @@ class LoggedList(list[_T]):
         indexes.sort(key=keyfunc, reverse=reverse) # type: ignore[arg-type]  # argsort
         # Assign through ``list`` to avoid re-entering our own __setitem__,
         # which would mark everything accessed.
+        if super().__len__() != len(items):
+            # ``list.sort`` detects this and raises rather than silently
+            # discarding the mutation; blind-writing the permutation below
+            # would lose it.
+            raise ValueError("list modified during sort")
         super().__setitem__(slice(None), [items[i] for i in indexes])
         self._unaccessed[:] = [self._unaccessed[i] for i in indexes]
 
     def __reduce__(self) -> tuple[Any, ...]:
-        # ``list`` subclasses are pickled/copied by reconstructing a bare
-        # instance and re-filling it, which never runs __init__ and would leave
-        # ``_unaccessed`` missing.  Reconstruct through the constructor
-        # instead, and carry the tracking state as plain booleans, since the
-        # ``_ACCESSED`` sentinel's identity does not survive pickling.
-        accessed = [x is self._ACCESSED for x in self._unaccessed]
-        return (type(self), (super().copy(),), accessed)
+        # ``list`` subclasses are pickled by reconstructing an instance and
+        # re-filling it, which never runs __init__ and would leave
+        # ``_unaccessed`` missing.  Reconstruct via ``_new_logged_list``
+        # instead of ``type(self)`` so this keeps working for subclasses whose
+        # __init__ takes different arguments, and pass the items through the
+        # ``listitems`` slot (4th element) rather than as constructor
+        # arguments: that slot is what lets pickle memoize the object before
+        # filling it, which is what makes self-referential lists work.
+        #
+        # The tracking state travels as plain booleans, since ``_ACCESSED`` is
+        # identified by identity and would not survive the trip.  Instance
+        # attributes ride along too, as they would for a plain list subclass.
+        attrs = {k: v for k, v in self.__dict__.items() if k != "_unaccessed"}
+        state = ([x is self._ACCESSED for x in self._unaccessed], attrs)
+        return (_new_logged_list, (type(self),), state,
+                iter(super().copy()))
 
-    def __setstate__(self, accessed: list[bool]) -> None:
-        self._unaccessed = [self._ACCESSED if was_accessed else x
-                            for was_accessed, x
+    def __setstate__(self, state: tuple[list[bool], dict[str, Any]]) -> None:
+        # Pickle applies state *after* the listitems have been appended, so the
+        # items are already in place here and ``_unaccessed`` can be rebuilt
+        # from them directly.
+        accessed, attrs = state
+        self.__dict__.update(attrs)
+        self._unaccessed = [self._ACCESSED if was_accessed else item
+                            for was_accessed, item
                             in zip(accessed, super().copy())]
+
+    def __copy__(self) -> "LoggedList[_T]":
+        # ``copy`` applies state *before* listitems -- the opposite order from
+        # pickle -- so handle both copy flavors explicitly rather than trying
+        # to serve both orders through __reduce__.
+        new = _new_logged_list(type(self))
+        list.extend(new, super().copy())
+        new.__dict__.update(
+            {k: v for k, v in self.__dict__.items() if k != "_unaccessed"})
+        new._unaccessed = list(self._unaccessed)
+        return new
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> "LoggedList[_T]":
+        from copy import deepcopy
+        new = _new_logged_list(type(self))
+        # Memoize before filling, so a list containing itself terminates.
+        memo[id(self)] = new
+        list.extend(new, [deepcopy(item, memo) for item in super().copy()])
+        new.__dict__.update({k: deepcopy(v, memo)
+                             for k, v in self.__dict__.items()
+                             if k != "_unaccessed"})
+        # Keep ``_unaccessed`` pointing at the *copied* items, so it stays
+        # aligned by identity as well as by position.
+        new._unaccessed = [self._ACCESSED if x is self._ACCESSED
+                           else list.__getitem__(new, i)
+                           for i, x in enumerate(self._unaccessed)]
+        return new
+
+    # Mirrors list's two overloads: adding a list of the same type preserves
+    # it, adding a list of another type widens the result.
+    @overload
+    def __add__(self, value: list[_T], /) -> list[_T]: ...
+    @overload
+    def __add__(self, value: list[_S], /) -> list[_S | _T]: ...
+
+    def __add__(self, value, /):
+        # ``+`` and ``*`` read every element, just like ``copy``, so they mark
+        # everything accessed; otherwise ``args = sys.argv + extra`` would be
+        # falsely reported as an unused argument.
+        self._mark_all_accessed()
+        return super().__add__(value)
+
+    def __mul__(self, value: SupportsIndex, /) -> list[_T]:
+        self._mark_all_accessed()
+        return super().__mul__(value)
+
+    def __rmul__(self, value: SupportsIndex, /) -> list[_T]:
+        self._mark_all_accessed()
+        return super().__rmul__(value)
 
     def __contains__(self, key: object, /) -> bool:
         try:
