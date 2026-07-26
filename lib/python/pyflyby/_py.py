@@ -1058,9 +1058,9 @@ _S = TypeVar("_S")
 
 
 def _new_logged_list(cls: Any) -> Any:
-    # Reconstructor for `LoggedList.__reduce__`: makes an instance without
-    # running __init__ (whose signature a subclass may have changed), with
-    # ``_unaccessed`` seeded so that the appends which follow do not fail.
+    # Reconstructor for `LoggedList.__reduce__`.  Skips __init__, whose
+    # signature a subclass may have changed; seeds ``_unaccessed`` so the
+    # appends that follow don't fail.
     obj = cls.__new__(cls)
     obj._unaccessed = []
     return obj
@@ -1072,24 +1072,21 @@ class LoggedList(list[_T]):
 
     Used by `SysArgvCtx` to detect command-line arguments the user never read.
 
-    This is a real `list` subclass, so it behaves exactly like a list.  Only
-    the methods that must do something extra are overridden: either they read
-    items (and so mark them accessed), or they mutate the list (and so must
-    apply the same structural edit to `_unaccessed`, which mirrors the items
-    position-for-position).  Everything else is inherited unchanged.
+    A real `list` subclass, so it behaves exactly like a list.  Overridden
+    methods are those that read items (marking them accessed) or mutate the
+    list (applying the same edit to `_unaccessed`).
 
-    GOTCHA: a method that mutates or reads items and is *not* overridden here
-    operates on the underlying storage directly, silently bypassing the
-    tracking rather than failing loudly.  The test
-    ``test_logged_list_inherits_only_tracking_neutral_methods`` pins down
-    exactly which methods are allowed to be inherited.
+    GOTCHA: a method left un-overridden reads the underlying storage directly,
+    bypassing the tracking silently rather than failing loudly.
+    ``test_logged_list_inherits_only_tracking_neutral_methods`` pins down which
+    ones may be inherited.
     """
 
 
     _ACCESSED = object()
 
-    # Mirrors the items position-for-position; each entry is either the item
-    # itself (not yet accessed) or the ``_ACCESSED`` sentinel.
+    # Mirrors the items; each entry is the item itself (not yet accessed) or
+    # the ``_ACCESSED`` sentinel.
     _unaccessed: list[Any]
 
     def __init__(self, items: Iterable[_T]) -> None:
@@ -1109,9 +1106,7 @@ class LoggedList(list[_T]):
         self._unaccessed.clear()
 
     def copy(self, /) -> list[_T]:
-        # Copying reads every element, just like ``sys.argv[:]``, so mark
-        # everything accessed and hand back a plain list (as ``list.copy``
-        # does).
+        # Copying reads every element, as ``sys.argv[:]`` does.
         self._mark_all_accessed()
         return super().copy()
 
@@ -1138,7 +1133,7 @@ class LoggedList(list[_T]):
         try:
             index = super().index(value)
         except ValueError:
-            # Report as ``list.remove`` does, not as ``list.index`` does.
+            # Report as list.remove does, not as list.index does.
             raise ValueError("list.remove(x): x not in list") from None
         self.pop(index)
 
@@ -1148,9 +1143,8 @@ class LoggedList(list[_T]):
 
     def sort(self, /, *, key: Callable[[_T], Any] | None = None,
              reverse: bool = False) -> None:
-        # Sorting must permute the tracking state the same way it permutes the
-        # items, so argsort rather than sorting in place.  Read the items
-        # through ``list`` so that sorting does not itself count as access.
+        # Argsort, so the same permutation can be applied to the tracking
+        # state.  Read through ``list`` so sorting is not itself an access.
         items = super().copy()
         if key is None:
             keyfunc = items.__getitem__
@@ -1158,38 +1152,26 @@ class LoggedList(list[_T]):
             keyfunc = lambda i: key(items[i])
         indexes = list(range(len(items)))
         indexes.sort(key=keyfunc, reverse=reverse) # type: ignore[arg-type]  # argsort
-        # Assign through ``list`` to avoid re-entering our own __setitem__,
-        # which would mark everything accessed.
         if super().__len__() != len(items):
-            # ``list.sort`` detects this and raises rather than silently
-            # discarding the mutation; blind-writing the permutation below
-            # would lose it.
+            # As list.sort does; the write-back below would discard it.
             raise ValueError("list modified during sort")
+        # Assign through ``list``: our own __setitem__ would mark everything.
         super().__setitem__(slice(None), [items[i] for i in indexes])
         self._unaccessed[:] = [self._unaccessed[i] for i in indexes]
 
     def __reduce__(self) -> tuple[Any, ...]:
-        # ``list`` subclasses are pickled by reconstructing an instance and
-        # re-filling it, which never runs __init__ and would leave
-        # ``_unaccessed`` missing.  Reconstruct via ``_new_logged_list``
-        # instead of ``type(self)`` so this keeps working for subclasses whose
-        # __init__ takes different arguments, and pass the items through the
-        # ``listitems`` slot (4th element) rather than as constructor
-        # arguments: that slot is what lets pickle memoize the object before
-        # filling it, which is what makes self-referential lists work.
-        #
-        # The tracking state travels as plain booleans, since ``_ACCESSED`` is
-        # identified by identity and would not survive the trip.  Instance
-        # attributes ride along too, as they would for a plain list subclass.
+        # Items go through the ``listitems`` slot rather than constructor
+        # args, so pickle can memoize this object before filling it -- that is
+        # what makes self-referential lists work.  Tracking state travels as
+        # booleans because ``_ACCESSED`` is matched by identity.
         attrs = {k: v for k, v in self.__dict__.items() if k != "_unaccessed"}
         state = ([x is self._ACCESSED for x in self._unaccessed], attrs)
         return (_new_logged_list, (type(self),), state,
                 iter(super().copy()))
 
     def __setstate__(self, state: tuple[list[bool], dict[str, Any]]) -> None:
-        # Pickle applies state *after* the listitems have been appended, so the
-        # items are already in place here and ``_unaccessed`` can be rebuilt
-        # from them directly.
+        # Pickle applies state after appending listitems, so the items are
+        # already here.
         accessed, attrs = state
         self.__dict__.update(attrs)
         self._unaccessed = [self._ACCESSED if was_accessed else item
@@ -1197,9 +1179,8 @@ class LoggedList(list[_T]):
                             in zip(accessed, super().copy())]
 
     def __copy__(self) -> "LoggedList[_T]":
-        # ``copy`` applies state *before* listitems -- the opposite order from
-        # pickle -- so handle both copy flavors explicitly rather than trying
-        # to serve both orders through __reduce__.
+        # ``copy`` applies state *before* listitems, the opposite order from
+        # pickle, so both copy flavors are handled explicitly.
         new = _new_logged_list(type(self))
         list.extend(new, super().copy())
         new.__dict__.update(
@@ -1216,24 +1197,21 @@ class LoggedList(list[_T]):
         new.__dict__.update({k: deepcopy(v, memo)
                              for k, v in self.__dict__.items()
                              if k != "_unaccessed"})
-        # Keep ``_unaccessed`` pointing at the *copied* items, so it stays
-        # aligned by identity as well as by position.
+        # Point ``_unaccessed`` at the copied items, not the originals.
         new._unaccessed = [self._ACCESSED if x is self._ACCESSED
                            else list.__getitem__(new, i)
                            for i, x in enumerate(self._unaccessed)]
         return new
 
-    # Mirrors list's two overloads: adding a list of the same type preserves
-    # it, adding a list of another type widens the result.
+    # Mirrors list's two overloads: same type preserves it, other widens.
     @overload
     def __add__(self, value: list[_T], /) -> list[_T]: ...
     @overload
     def __add__(self, value: list[_S], /) -> list[_S | _T]: ...
 
     def __add__(self, value, /):
-        # ``+`` and ``*`` read every element, just like ``copy``, so they mark
-        # everything accessed; otherwise ``args = sys.argv + extra`` would be
-        # falsely reported as an unused argument.
+        # ``+`` and ``*`` read every element; without this,
+        # ``args = sys.argv + extra`` is falsely reported unused.
         self._mark_all_accessed()
         return super().__add__(value)
 
@@ -1270,8 +1248,8 @@ class LoggedList(list[_T]):
             self._unaccessed[idx] = self._ACCESSED
         return result
 
-    # mypy requires __iadd__ be compatible with __add__, which takes only a
-    # list; this mirrors list.__iadd__, which likewise accepts any iterable.
+    # mypy wants __iadd__ compatible with __add__ (list only); this mirrors
+    # list.__iadd__, which accepts any iterable.
     def __iadd__(self, value: Iterable[_T], /) -> Self:  # type: ignore[override,misc]
         self.extend(value)
         return self
@@ -1303,14 +1281,11 @@ class LoggedList(list[_T]):
     def __setitem__(self, idx: slice, value: Iterable[_T], /) -> None: ...
 
     def __setitem__(self, idx: SupportsIndex | slice, value: Any, /) -> None:
-        # Assigning to a position counts as *accessing* it, for both single-index
-        # and slice assignment: the caller has replaced whatever was there, so
-        # the old value can no longer be reported as an unused argument, and the
-        # value they just wrote is one they evidently already know about.
+        # Assigning counts as accessing: the old value is gone, and the new
+        # one is evidently known to the caller.
         if isinstance(idx, slice):
-            # A slice assignment takes any iterable (which the assignment below
-            # would consume), and can change the length of the list, so
-            # materialize the value to get both the items and their count.
+            # Any iterable, which the assignment would consume, and the
+            # length can change; materialize to get the items and the count.
             value = list(value)
             marker: Any = [self._ACCESSED] * len(value)
         else:
