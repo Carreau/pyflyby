@@ -6,16 +6,23 @@
 
 from __future__ import print_function
 
+import pyflyby._parse
 from   pyflyby._file            import FilePos, FileText, Filename
 from   pyflyby._flags           import CompilerFlags
 from   pyflyby._imports2s       import SourceToSourceFileImportsTransformation
-from   pyflyby._parse           import PythonBlock, PythonStatement
+from   pyflyby._parse           import (PythonBlock, PythonStatement,
+                                    _ast_str_literal_value,
+                                    _is_comment_or_blank,
+                                    _test_parse_string_literal,
+                                    infer_compile_mode)
 from   pyflyby.check_parse      import check_parse_main
 
+import ast
 import os
 import pytest
 import sys
 from   textwrap                 import dedent
+from   unittest.mock            import Mock
 import warnings
 
 print_function_flag = CompilerFlags.from_int(0x100000)
@@ -1716,3 +1723,230 @@ def test_check_parse_pyflyby_itself(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["check_parse", pyflyby_path])
     result = check_parse_main()
     assert result == 0, result
+
+
+@pytest.mark.parametrize(
+    "line, expected",
+    [("foo\n", False), ("  # blah\n", True), ("\n", True), ("", True)],
+)
+def test_is_comment_or_blank_1(line, expected):
+    assert _is_comment_or_blank(line) is expected
+
+
+@pytest.mark.parametrize(
+    "node, expected",
+    [
+        (ast.Constant("x"), "x"),
+        (ast.Expr(ast.Constant(b"x")), b"x"),
+        (ast.Constant(1), None),
+    ],
+)
+def test_ast_str_literal_value_1(node, expected):
+    assert _ast_str_literal_value(node) == expected
+
+
+def test_test_parse_string_literal_1():
+    assert _test_parse_string_literal('"foo"', None) == "foo"
+    assert _test_parse_string_literal("1", None) is None
+    assert _test_parse_string_literal("1+", None) is None
+
+
+@pytest.mark.parametrize(
+    "source, mode", [("x = 1\n", "exec"), ("1\n", "single"), ("1", "eval")]
+)
+def test_infer_compile_mode_1(source, mode):
+    assert infer_compile_mode(ast.parse(source, mode=mode)) == mode
+
+
+def test_infer_compile_mode_bad_node_1():
+    with pytest.raises(TypeError, match="FunctionDef"):
+        infer_compile_mode(ast.parse("def f(): pass").body[0])
+
+
+def test_PythonStatement_construct_1():
+    with pytest.raises(TypeError, match="unexpected int"):
+        PythonStatement(123)
+    stmt = PythonStatement(
+        "from __future__ import print_function\n",
+        filename="/foo/bar.py",
+        startpos=(7, 3),
+    )
+    assert PythonStatement.from_statement(stmt) is stmt
+    assert stmt.filename == Filename("/foo/bar.py")
+    assert stmt.startpos == FilePos(7, 3)
+    assert stmt.flags == print_function_flag
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [("a = 1\n", True), ("a = b = 1\n", False), ("x\n", False)],
+)
+def test_PythonStatement_is_single_assign_1(source, expected):
+    assert PythonStatement(source).is_single_assign is expected
+
+
+def test_PythonStatement_get_assignment_literal_value_1():
+    stmt = PythonStatement("foo = {1: [2]}\n")
+    assert stmt.get_assignment_literal_value() == ("foo", {1: [2]})
+    with pytest.raises(ValueError, match="not an assignment"):
+        PythonStatement("foo()\n").get_assignment_literal_value()
+    with pytest.raises(ValueError):
+        PythonStatement("foo = bar()\n").get_assignment_literal_value()
+
+
+def test_PythonStatement_ast_node_multiple_nodes_1():
+    # A statement holds at most one AST node; guard that invariant.
+    stmt = PythonStatement("x\n")
+    stmt.block = PythonBlock("a = 1\nb = 2\n")
+    with pytest.raises(AssertionError, match="More than one AST node"):
+        stmt.ast_node
+
+
+def test_PythonStatement_dunder_1():
+    stmt = PythonStatement("a = 1\n")
+    other = PythonStatement("b = 2\n")
+    assert repr(stmt) == "PythonStatement('a = 1\\n')"
+    assert stmt == stmt and stmt == PythonStatement("a = 1\n")
+    assert stmt != other and stmt < other
+    assert hash(stmt) == hash(PythonStatement("a = 1\n"))
+    assert stmt.__eq__(1) is NotImplemented
+    assert stmt.__lt__(1) is NotImplemented
+
+
+def test_PythonBlock_construct_1(tmp_path):
+    with pytest.raises(TypeError, match="unexpected 'int'"):
+        PythonBlock(123)
+    stmt = PythonStatement("x = 1\n")
+    assert PythonBlock(stmt, flags=print_function_flag).flags == print_function_flag
+    path = tmp_path / "from_filename_1.py"
+    path.write_text("x = 1\n")
+    block = PythonBlock.from_filename(str(path))
+    assert block.filename == Filename(str(path))
+    assert str(block) == "x = 1\n"
+    assert PythonBlock("x = 1\n", startpos=(3, 4)).endpos == FilePos(4, 1)
+
+
+def test_PythonBlock_concatenate_1():
+    a = PythonBlock("a = 1\n")
+    assert PythonBlock.concatenate([a]) is a
+    with pytest.warns(UserWarning, match="deprecated"):
+        block = PythonBlock.concatenate(
+            [a, PythonStatement("b = 2\n"), "c = 3\n"], assume_contiguous=True
+        )
+    assert str(block) == "a = 1\nb = 2\nc = 3\n"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=pytest.fail.Exception,
+    reason="concatenate() overwrites assume_contiguous with True before "
+           "checking it, so the NotImplementedError branch is unreachable "
+           "(see _parse.py PythonBlock.concatenate)",
+)
+def test_PythonBlock_concatenate_not_contiguous_1():
+    with pytest.warns(UserWarning), pytest.raises(NotImplementedError):
+        PythonBlock.concatenate(
+            [PythonBlock("a\n"), PythonBlock("b\n")], assume_contiguous=False
+        )
+
+
+def test_PythonBlock_parse_error_1(monkeypatch, tmp_path):
+    path = str(tmp_path / "bad_syntax_1.py")
+    block = PythonBlock("def\n", filename=path)
+    assert not block.parsable
+    with pytest.raises(SyntaxError, match="While parsing") as excinfo:
+        block.ast_node
+    assert path in str(excinfo.value)
+
+    # If the exception type can't be rebuilt from a single message, the
+    # original exception is kept.
+    class TwoArgError(Exception):
+        def __init__(self, a, b):
+            super().__init__(a, b)
+
+    def fail(*args, **kwargs):
+        raise TwoArgError(1, 2)
+
+    monkeypatch.setattr(pyflyby._parse, "_parse_ast_nodes", fail)
+    with pytest.raises(TwoArgError):
+        PythonBlock("x = 1\n", filename=path).ast_node
+
+
+def test_PythonBlock_parsable_as_expression_1():
+    assert PythonBlock("1 + 1").parsable_as_expression
+    assert not PythonBlock("x = 1").parsable_as_expression
+    assert not PythonBlock("def").parsable_as_expression
+
+
+def test_PythonBlock_parse_1():
+    assert isinstance(PythonBlock("1 + 1").parse(), ast.Expression)
+    assert isinstance(PythonBlock("x = 1\n").parse(), ast.Module)
+    assert isinstance(PythonBlock("x = 1\n").parse("exec"), ast.Module)
+    with pytest.raises(ValueError, match="invalid mode"):
+        PythonBlock("x = 1\n").parse("bogus")
+
+
+def test_PythonBlock_parse_eval_mode_deprecated_1():
+    # Deprecated since 1.12.0; previously raised AssertionError on expressions.
+    with pytest.warns(DeprecationWarning, match="mode='eval'\\) is deprecated"):
+        node = PythonBlock("1 + 1").parse("eval")
+    assert isinstance(node, ast.Expression)
+    assert isinstance(node.body, ast.BinOp)
+    with pytest.warns(DeprecationWarning), pytest.raises(SyntaxError):
+        PythonBlock("x = 1\n").parse("eval")
+
+
+def test_PythonBlock_compile_1():
+    assert eval(PythonBlock("1 + 1").compile()) == 2
+    namespace = {}
+    exec(PythonBlock("x = 1\n").compile("exec"), namespace)
+    assert namespace["x"] == 1
+
+
+@pytest.mark.parametrize(
+    "source, message, truncated",
+    [
+        ('def f():\n    """\n    >>> x\n  ... y\n    """\n',
+         "Can't parse docstring", False),
+        ('def f():\n    """\n    %s\n    >>> x\n  ... y\n    """\n' % ("a" * 80),
+         "Can't parse docstring", True),
+        ('def f():\n    """\n    >>> def\n    """\n',
+         "Can't parse doctest", False),
+        ('def f():\n    """\n    >>> def %s\n    """\n' % ("a" * 80),
+         "Can't parse doctest", True),
+    ],
+)
+def test_PythonBlock_get_doctests_unparsable_1(monkeypatch, source, message, truncated):
+    mock_logger = Mock()
+    monkeypatch.setattr(pyflyby._parse, "logger", mock_logger)
+    assert PythonBlock(source).get_doctests() == []
+    fmt, blob = mock_logger.warning.call_args[0]
+    assert message in fmt
+    assert blob.endswith("...") is truncated
+
+
+def test_PythonBlock_get_doctests_empty_1():
+    assert PythonBlock("").get_doctests() == []
+
+
+def test_PythonBlock_repr_str_1(tmp_path):
+    path = str(tmp_path / "repr_1.py")
+    block = PythonBlock(
+        "x = 1\n", filename=path, startpos=(3, 4), flags=print_function_flag
+    )
+    r = repr(block)
+    assert r.startswith("PythonBlock('x = 1\\n'")
+    assert "filename=%r" % path in r
+    assert "startpos=(3,4)" in r
+    assert "flags=0x100000" in r
+    assert str(block) == "x = 1\n"
+
+
+def test_PythonBlock_eq_lt_hash_1():
+    block = PythonBlock("x = 1\n")
+    assert block == block and block == PythonBlock("x = 1\n")
+    assert block != PythonBlock("x = 2\n")
+    assert block < PythonBlock("x = 2\n")
+    assert block.__eq__(1) is NotImplemented
+    assert block.__lt__(1) is NotImplemented
+    assert hash(block) == hash(PythonBlock("x = 1\n"))

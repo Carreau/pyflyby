@@ -764,6 +764,17 @@ class PythonBlock:
           and "eval" work as the built-in ``compile`` function do.  If ``None``,
           then default to "eval" if the input is a string with a single
           expression, else "exec".
+
+          .. deprecated:: 1.12.0
+             ``mode="eval"`` is deprecated; use ``mode=None`` instead, which
+             returns an ``ast.Expression`` for single-expression code.  Note
+             that ``mode=None`` returns an ``ast.Module`` rather than raising
+             ``SyntaxError`` when the code is not a single expression.
+
+             This mode was previously broken: it raised ``AssertionError``
+             for any input that is a single expression, because it asserted
+             that ``ast_node`` was an ``ast.Expression``.  It now returns the
+             single expression as expected, but emits a ``DeprecationWarning``.
         :rtype:
           ``ast.AST``
         """
@@ -771,8 +782,14 @@ class PythonBlock:
             assert isinstance(self.ast_node, ast.Module)
             return self.ast_node
         elif mode == "eval":
+            warnings.warn(
+                "PythonBlock.parse(mode='eval') is deprecated since pyflyby "
+                "1.12.0; use parse() instead, which returns an ast.Expression "
+                "for single-expression code",
+                DeprecationWarning, stacklevel=2)
+            # ``expression_ast_node`` checks that the module holds exactly one
+            # expression statement and extracts it as an ``ast.Expression``.
             if self.expression_ast_node:
-                assert isinstance(self.ast_node, ast.Expression)
                 return self.expression_ast_node
             else:
                 raise SyntaxError

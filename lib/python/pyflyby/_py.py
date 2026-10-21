@@ -1876,7 +1876,7 @@ class _PyMain(object):
         if isinstance(arg, (ModuleHandle, types.ModuleType)):
             module = ModuleHandle(arg).module
         else:
-            module = self.namespace.auto_eval(arg, mode="eval")
+            module = self.namespace.auto_eval(arg)
         if not isinstance(module, types.ModuleType):
             raise TypeError("print_version(): got a %s instead of a module"
                             % (type(module).__name__,))
